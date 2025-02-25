@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 
-const socket = io(import.meta.env.VITE_SOCKETIO);
+const socket = io(import.meta.env.VITE_SOCKETIO, { transports: ["websocket"] });
+
 
 const RoomJoin = () => {
   const [roomId, setRoomId] = useState('');
@@ -18,31 +19,36 @@ const RoomJoin = () => {
           if (!localStreamRef.current) {
             const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
             localStreamRef.current = stream;
+
             if (localVideoRef.current) {
               localVideoRef.current.srcObject = stream;
             }
 
-            socket.emit('newProducer', { roomId, producerId: socket.id });
+            console.log("Local stream ID:", stream.id);
+
+            socket.emit('newProducer', {
+              roomId,
+              producerId: socket.id,
+              streamId: stream.id
+            });
 
             socket.on('existingProducers', async (producers) => {
               for (const producer of producers) {
-                if (producer.producerId !== socket.id && !peerConnections.current[producer.producerId]) {
+                if (producer.producerId !== socket.id) {
                   await connectToProducer(producer.producerId);
                 }
               }
             });
 
             socket.on('newProducerAvailable', async ({ producerId }) => {
-              if (producerId !== socket.id && !peerConnections.current[producerId]) {
+              if (producerId !== socket.id) {
                 await connectToProducer(producerId);
               }
             });
 
             socket.on('offer', async ({ from, offer }) => {
-              let peerConnection = peerConnections.current[from];
-              if (!peerConnection) {
-                peerConnection = createPeerConnection(from);
-              }
+              console.log("Received offer from:", from);
+              let peerConnection = peerConnections.current[from] || createPeerConnection(from);
 
               localStreamRef.current.getTracks().forEach((track) => {
                 if (!peerConnection.getSenders().some((sender) => sender.track === track)) {
@@ -57,6 +63,7 @@ const RoomJoin = () => {
             });
 
             socket.on('answer', async ({ from, answer }) => {
+              console.log("Received answer from:", from);
               const peerConnection = peerConnections.current[from];
               if (peerConnection && peerConnection.signalingState === 'have-local-offer') {
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
@@ -66,11 +73,13 @@ const RoomJoin = () => {
             socket.on('iceCandidate', ({ from, candidate }) => {
               const peerConnection = peerConnections.current[from];
               if (peerConnection) {
+                console.log("Received ICE candidate from:", from);
                 peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
               }
             });
 
             socket.on('peerLeft', ({ producerId }) => {
+              console.log("Peer left:", producerId);
               if (peerConnections.current[producerId]) {
                 peerConnections.current[producerId].close();
                 delete peerConnections.current[producerId];
@@ -89,6 +98,7 @@ const RoomJoin = () => {
 
       const connectToProducer = async (producerId) => {
         if (peerConnections.current[producerId]) return; // Prevent duplicate connections
+        console.log("Connecting to producer:", producerId);
         const peerConnection = createPeerConnection(producerId);
 
         localStreamRef.current.getTracks().forEach((track) => {
@@ -105,6 +115,7 @@ const RoomJoin = () => {
 
         peerConnection.onicecandidate = (event) => {
           if (event.candidate) {
+            console.log("Sending ICE candidate to:", peerId);
             socket.emit('iceCandidate', {
               to: peerId,
               candidate: event.candidate,
@@ -114,6 +125,7 @@ const RoomJoin = () => {
 
         peerConnection.ontrack = (event) => {
           if (event.streams && event.streams[0]) {
+            console.log("Receiving stream from:", peerId);
             setRemoteStreams((prev) => {
               const updated = new Map(prev);
               updated.set(peerId, event.streams[0]);
@@ -135,6 +147,10 @@ const RoomJoin = () => {
         socket.off('newProducerAvailable');
         socket.off('existingProducers');
         socket.off('peerLeft');
+
+        Object.values(peerConnections.current).forEach((peerConnection) => peerConnection.close());
+        peerConnections.current = {};
+
         if (localStreamRef.current) {
           localStreamRef.current.getTracks().forEach((track) => track.stop());
           localStreamRef.current = null;
