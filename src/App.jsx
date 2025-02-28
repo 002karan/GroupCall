@@ -13,7 +13,7 @@ function App() {
       <RoomJoin />
       <div className="min-h-screen bg-white text-black p-4">
         <h1 className="text-2xl font-bold text-center">Multi-User Video Chat Room</h1>
-        <VideoRoom roomId="test-room" />
+      
       </div>
     </WebRTCProvider>
 

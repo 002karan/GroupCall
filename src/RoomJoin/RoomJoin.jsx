@@ -3,102 +3,135 @@ import io from 'socket.io-client';
 
 const socket = io(import.meta.env.VITE_SOCKETIO, { transports: ["websocket"] });
 
-
 const RoomJoin = () => {
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
   const [remoteStreams, setRemoteStreams] = useState(new Map());
+  const [localStream, setLocalStream] = useState(null);
   const localVideoRef = useRef(null);
   const peerConnections = useRef({});
   const localStreamRef = useRef(null);
 
   useEffect(() => {
+    const setupLocalStream = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localStreamRef.current = stream;
+        setLocalStream(localStreamRef.current)
+
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        setLocalStream(localVideoRef.current.srcObject)
+
+        }
+
+        // console.log("Local stream ID:", stream.id);
+      } catch (err) {
+        console.error('Failed to access camera/mic', err);
+      }
+    };
+
+    setupLocalStream();
+  }, []);
+
+
+
+
+
+
+  useEffect(() => {
     if (joined) {
       const setupLocalStream = async () => {
         try {
-          if (!localStreamRef.current) {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-            localStreamRef.current = stream;
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          localStreamRef.current = stream;
 
-            if (localVideoRef.current) {
-              localVideoRef.current.srcObject = stream;
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = stream;
+          }
+
+          // console.log("Local stream ID:", stream.id);
+
+          socket.emit('newProducer', {
+            roomId,
+            producerId: socket.id,
+            streamId: stream.id
+          });
+
+          socket.on('existingProducers', async (producers) => {
+            for (const producer of producers) {
+              if (producer.producerId !== socket.id) {
+                await connectToProducer(producer.producerId);
+              }
+            }
+          });
+
+          socket.on('newProducerAvailable', async ({ producerId }) => {
+            if (producerId !== socket.id) {
+              await connectToProducer(producerId);
+            }
+          });
+
+          socket.on('offer', async ({ from, offer }) => {
+            // console.log("Received offer from:", from);
+            let peerConnection = peerConnections.current[from] || createPeerConnection(from);
+
+            localStreamRef.current.getTracks().forEach((track) => {
+              if (!peerConnection.getSenders().some((sender) => sender.track === track)) {
+                peerConnection.addTrack(track, localStreamRef.current);
+              }
+            });
+
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            socket.emit('answer', { to: from, answer });
+          });
+
+          socket.on('answer', async ({ from, answer }) => {
+            // console.log("Received answer from:", from);
+            const peerConnection = peerConnections.current[from];
+            if (peerConnection && peerConnection.signalingState === 'have-local-offer') {
+              await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+            }
+          });
+
+          socket.on('iceCandidate', ({ from, candidate }) => {
+            console.log(`Received ICE candidate from: ${from}`);
+            const peerConnection = peerConnections.current[from];
+            if (peerConnection) {
+              // console.log("Received ICE candidate from:", from);
+              peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            }
+          });
+
+          socket.on("peerLeft", ({ producerId }) => {
+            console.log(`Peer left: ${producerId}`);
+
+            if (peerConnections.current[producerId]) {
+              peerConnections.current[producerId].close();
+              delete peerConnections.current[producerId];
             }
 
-            console.log("Local stream ID:", stream.id);
-
-            socket.emit('newProducer', {
-              roomId,
-              producerId: socket.id,
-              streamId: stream.id
+            setRemoteStreams((prev) => {
+              const updated = new Map(prev);
+              updated.delete(producerId);
+              return new Map(updated);
             });
+          });
 
-            socket.on('existingProducers', async (producers) => {
-              for (const producer of producers) {
-                if (producer.producerId !== socket.id) {
-                  await connectToProducer(producer.producerId);
-                }
-              }
-            });
-
-            socket.on('newProducerAvailable', async ({ producerId }) => {
-              if (producerId !== socket.id) {
-                await connectToProducer(producerId);
-              }
-            });
-
-            socket.on('offer', async ({ from, offer }) => {
-              console.log("Received offer from:", from);
-              let peerConnection = peerConnections.current[from] || createPeerConnection(from);
-
-              localStreamRef.current.getTracks().forEach((track) => {
-                if (!peerConnection.getSenders().some((sender) => sender.track === track)) {
-                  peerConnection.addTrack(track, localStreamRef.current);
-                }
-              });
-
-              await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-              const answer = await peerConnection.createAnswer();
-              await peerConnection.setLocalDescription(answer);
-              socket.emit('answer', { to: from, answer });
-            });
-
-            socket.on('answer', async ({ from, answer }) => {
-              console.log("Received answer from:", from);
-              const peerConnection = peerConnections.current[from];
-              if (peerConnection && peerConnection.signalingState === 'have-local-offer') {
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-              }
-            });
-
-            socket.on('iceCandidate', ({ from, candidate }) => {
-              const peerConnection = peerConnections.current[from];
-              if (peerConnection) {
-                console.log("Received ICE candidate from:", from);
-                peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-              }
-            });
-
-            socket.on('peerLeft', ({ producerId }) => {
-              console.log("Peer left:", producerId);
-              if (peerConnections.current[producerId]) {
-                peerConnections.current[producerId].close();
-                delete peerConnections.current[producerId];
-              }
-              setRemoteStreams((prev) => {
-                const updated = new Map(prev);
-                updated.delete(producerId);
-                return updated;
-              });
-            });
-          }
         } catch (err) {
           console.error('Failed to access camera/mic', err);
         }
       };
 
       const connectToProducer = async (producerId) => {
-        if (peerConnections.current[producerId]) return; // Prevent duplicate connections
-        console.log("Connecting to producer:", producerId);
+        if (peerConnections.current[producerId]) {
+          console.warn(`Already connected to producer: ${producerId}`);
+          return; // Prevent duplicate connections
+        }
+
+        console.log(`Connecting to producer: ${producerId}`);
         const peerConnection = createPeerConnection(producerId);
 
         localStreamRef.current.getTracks().forEach((track) => {
@@ -107,15 +140,16 @@ const RoomJoin = () => {
 
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
-        socket.emit('offer', { roomId, offer, to: producerId });
+        socket.emit("offer", { roomId, offer, to: producerId });
       };
+
 
       const createPeerConnection = (peerId) => {
         const peerConnection = new RTCPeerConnection();
 
         peerConnection.onicecandidate = (event) => {
           if (event.candidate) {
-            console.log("Sending ICE candidate to:", peerId);
+            console.log(`Sending ICE candidate to: ${peerId}`);
             socket.emit('iceCandidate', {
               to: peerId,
               candidate: event.candidate,
@@ -125,7 +159,7 @@ const RoomJoin = () => {
 
         peerConnection.ontrack = (event) => {
           if (event.streams && event.streams[0]) {
-            console.log("Receiving stream from:", peerId);
+            // console.log(`Receiving stream from ontrack: ${peerId}, Stream ID: ${event.streams[0].id}`);
             setRemoteStreams((prev) => {
               const updated = new Map(prev);
               updated.set(peerId, event.streams[0]);
@@ -187,28 +221,36 @@ const RoomJoin = () => {
         </div>
       ) : (
         <div className="grid grid-cols-3 gap-4 p-4 w-full">
-          <div className="bg-gray-100 rounded-lg p-2">
-            <p className="text-center font-bold">Your Video</p>
-            <video ref={localVideoRef} autoPlay muted className="w-full h-auto rounded-lg" style={{ border: '2px solid red' }} />
-          </div>
-          {Array.from(remoteStreams.entries()).map(([producerId, stream]) => (
-            <div key={producerId} className="bg-gray-100 rounded-lg p-2">
-              <p className="text-center font-bold">User ID: {producerId}</p>
-              <video
+
+{Array.from(remoteStreams.entries()).map(([producerId, stream], index) => {
+    // console.log(`Stream ${index + 1}: Producer ID: ${producerId}, Stream ID: ${stream?.id}`);
+
+    return (
+        <div key={producerId} className="bg-gray-100 rounded-lg p-2">
+            <p className="text-center font-bold">User ID: {producerId}</p>
+            <video
                 autoPlay
                 ref={(video) => {
-                  if (video && stream) {
-                    video.srcObject = stream;
-                  }
+                  if (video && video.srcObject !== stream)  {
+
+                        video.srcObject = stream;
+                    }
                 }}
                 className="w-full h-auto rounded-lg"
                 style={{ border: '2px solid red' }}
-              />
-            </div>
-          ))}
+            />
+        </div>
+    );
+})}
+
         </div>
       )}
+      <div className="bg-gray-100 rounded-lg p-2">
+        <p className="text-center font-bold">Your Video</p>
+        <video ref={localVideoRef} autoPlay muted className="w-full h-auto rounded-lg" style={{ border: '2px solid red' }} />
+      </div>
     </div>
+
   );
 };
 
