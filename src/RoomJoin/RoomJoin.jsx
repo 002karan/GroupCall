@@ -21,7 +21,7 @@ const RoomJoin = () => {
 
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
-        setLocalStream(localVideoRef.current.srcObject)
+          setLocalStream(localVideoRef.current.srcObject)
 
         }
 
@@ -105,20 +105,21 @@ const RoomJoin = () => {
             }
           });
 
-          socket.on("peerLeft", ({ producerId }) => {
-            console.log(`Peer left: ${producerId}`);
+          socket.on("userDisconnected", ({ peerId }) => {
+            console.log(`Peer disconnected: ${peerId}`);
 
-            if (peerConnections.current[producerId]) {
-              peerConnections.current[producerId].close();
-              delete peerConnections.current[producerId];
+            if (peerConnections.current[peerId]) {
+              peerConnections.current[peerId].close();
+              delete peerConnections.current[peerId];
             }
 
             setRemoteStreams((prev) => {
               const updated = new Map(prev);
-              updated.delete(producerId);
+              updated.delete(peerId);
               return new Map(updated);
             });
           });
+
 
         } catch (err) {
           console.error('Failed to access camera/mic', err);
@@ -168,6 +169,29 @@ const RoomJoin = () => {
           }
         };
 
+        peerConnection.getSenders().forEach((sender) => {
+          if (sender.track.kind === "video") {
+            const params = sender.getParameters();
+            if (!params.encodings) params.encodings = [{}];
+
+            params.encodings[0].maxBitrate = 500000; // 500kbps
+            params.encodings[0].minBitrate = 300000; // 300kbps
+            params.encodings[0].maxFramerate = 30;   // 30fps
+            sender.setParameters(params);
+          }
+        });
+
+        peerConnection.getTransceivers().forEach(transceiver => {
+          if (transceiver.sender.track.kind === "video") {
+            transceiver.setCodecPreferences([
+              { mimeType: "video/VP9" },
+              { mimeType: "video/VP8" },
+              { mimeType: "video/H264" },
+            ]);
+          }
+        });
+
+
         peerConnections.current[peerId] = peerConnection;
         return peerConnection;
       };
@@ -200,6 +224,45 @@ const RoomJoin = () => {
     }
   };
 
+  const handleLeaveRoom = () => {
+    socket.emit('leaveRoom', { roomId });
+    setJoined(false);
+  };
+
+
+  const getStats = async () => {
+    for (const peerId in peerConnections.current) {
+      const peerConnection = peerConnections.current[peerId];
+
+      if (peerConnection) {
+        const stats = await peerConnection.getStats();
+        stats.forEach((report) => {
+          if (report.type === "outbound-rtp" && report.kind === "video") {
+            const bitrate = report.bytesSent * 8 / (report.timestamp / 1000); // Convert to bps
+            console.log(`📊 Outbound | Peer: ${peerId} | Bitrate: ${bitrate} bps`);
+          }
+          if (report.type === "inbound-rtp" && report.kind === "video") {
+            const bitrate = report.bytesReceived * 8 / (report.timestamp / 1000);
+            console.log(`📊 Inbound | Peer: ${peerId} | Bitrate: ${bitrate} bps`);
+          }
+        });
+      }
+    }
+  };
+
+
+  useEffect(() => {
+    if (joined) {
+      const interval = setInterval(() => {
+        getStats();
+      }, 5000);
+
+      return () => clearInterval(interval);
+    }
+  }, [joined]);
+
+
+
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-white text-black">
       {!joined ? (
@@ -222,26 +285,26 @@ const RoomJoin = () => {
       ) : (
         <div className="grid grid-cols-3 gap-4 p-4 w-full">
 
-{Array.from(remoteStreams.entries()).map(([producerId, stream], index) => {
-    // console.log(`Stream ${index + 1}: Producer ID: ${producerId}, Stream ID: ${stream?.id}`);
+          {Array.from(remoteStreams.entries()).map(([producerId, stream], index) => {
+            // console.log(`Stream ${index + 1}: Producer ID: ${producerId}, Stream ID: ${stream?.id}`);
 
-    return (
-        <div key={producerId} className="bg-gray-100 rounded-lg p-2">
-            <p className="text-center font-bold">User ID: {producerId}</p>
-            <video
-                autoPlay
-                ref={(video) => {
-                  if (video && video.srcObject !== stream)  {
+            return (
+              <div key={producerId} className="bg-gray-100 rounded-lg p-2">
+                <p className="text-center font-bold">User ID: {producerId}</p>
+                <video
+                  autoPlay
+                  ref={(video) => {
+                    if (video && video.srcObject !== stream) {
 
-                        video.srcObject = stream;
+                      video.srcObject = stream;
                     }
-                }}
-                className="w-full h-auto rounded-lg"
-                style={{ border: '2px solid red' }}
-            />
-        </div>
-    );
-})}
+                  }}
+                  className="w-full h-auto rounded-lg"
+                  style={{ border: '2px solid red' }}
+                />
+              </div>
+            );
+          })}
 
         </div>
       )}
